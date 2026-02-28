@@ -48,6 +48,7 @@ const LABELS = {
     welcomeSub: "Take a photo, upload an image, or paste text — in any of your languages",
     readingGuide: "Reading Guide", tapToRead: "Tap any saved note to read it",
     or: "or", speechRate: "Speech Rate", slow: "Slow", fast: "Fast",
+    pause: "Pause", resume: "Resume",
   },
   pt: {
     scan: "Digitalizar", read: "Ler", write: "Escrever", notes: "Notas", settings: "Definições",
@@ -65,6 +66,7 @@ const LABELS = {
     welcomeSub: "Tire uma foto, carregue uma imagem ou cole texto — em qualquer idioma",
     readingGuide: "Guia de Leitura", tapToRead: "Toque numa nota para ler",
     or: "ou", speechRate: "Velocidade", slow: "Lento", fast: "Rápido",
+    pause: "Pausar", resume: "Continuar",
   },
   es: {
     scan: "Escanear", read: "Leer", write: "Escribir", notes: "Notas", settings: "Ajustes",
@@ -82,6 +84,7 @@ const LABELS = {
     welcomeSub: "Toma una foto, sube una imagen o pega texto — en cualquier idioma",
     readingGuide: "Guía de Lectura", tapToRead: "Toca una nota para leerla",
     or: "o", speechRate: "Velocidad", slow: "Lento", fast: "Rápido",
+    pause: "Pausar", resume: "Reanudar",
   },
   pl: {
     scan: "Skanuj", read: "Czytaj", write: "Pisz", notes: "Notatki", settings: "Ustawienia",
@@ -99,6 +102,7 @@ const LABELS = {
     welcomeSub: "Zrób zdjęcie, prześlij obraz lub wklej tekst — w dowolnym języku",
     readingGuide: "Linia Czytania", tapToRead: "Dotknij notatkę, aby ją przeczytać",
     or: "lub", speechRate: "Prędkość", slow: "Wolno", fast: "Szybko",
+    pause: "Pauza", resume: "Wznów",
   },
   bg: {
     scan: "Сканирай", read: "Четене", write: "Писане", notes: "Бележки", settings: "Настройки",
@@ -116,6 +120,7 @@ const LABELS = {
     welcomeSub: "Направете снимка, качете изображение или поставете текст — на всеки език",
     readingGuide: "Водач за Четене", tapToRead: "Докоснете бележка, за да я прочетете",
     or: "или", speechRate: "Скорост", slow: "Бавно", fast: "Бързо",
+    pause: "Пауза", resume: "Продължи",
   },
   ro: {
     scan: "Scanează", read: "Citește", write: "Scrie", notes: "Note", settings: "Setări",
@@ -133,6 +138,7 @@ const LABELS = {
     welcomeSub: "Faceți o poză, încărcați o imagine sau lipiți text — în orice limbă",
     readingGuide: "Ghid de Citire", tapToRead: "Atinge o notă pentru a o citi",
     or: "sau", speechRate: "Viteză", slow: "Lent", fast: "Rapid",
+    pause: "Pauză", resume: "Continuă",
   },
 };
 
@@ -188,24 +194,83 @@ const LETTER_SPACINGS = { normal: "0em", wide: "0.04em", wider: "0.07em" };
 // ─── HELPERS ─────────────────────────────────────────────────────
 const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
-function speak(text, langId = "en", rate = 0.9) {
-  if (!("speechSynthesis" in window)) return;
-  window.speechSynthesis.cancel();
-  const lang = getLang(langId);
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = lang.tts;
-  u.rate = rate;
-  u.pitch = 1;
-  // try to pick a voice that matches the language
-  const voices = window.speechSynthesis.getVoices();
-  const match = voices.find((v) => v.lang.startsWith(lang.tts.split("-")[0]));
-  if (match) u.voice = match;
-  window.speechSynthesis.speak(u);
-}
+// TTS engine — handles Chrome's bug where long utterances silently die.
+// We split text into short sentences and queue them one at a time.
+const ttsEngine = {
+  _queue: [],
+  _speaking: false,
+  _paused: false,
+  _onStateChange: null,
+  _langId: "en",
+  _rate: 0.9,
 
-function stopSpeaking() {
-  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-}
+  speak(text, langId = "en", rate = 0.9) {
+    if (!("speechSynthesis" in window)) return;
+    this.stop();
+    this._langId = langId;
+    this._rate = rate;
+    // Split into sentences (max ~200 chars each) to avoid Chrome timeout
+    const sentences = text.match(/[^.!?\n]+[.!?\n]+|[^.!?\n]+$/g) || [text];
+    this._queue = sentences.map((s) => s.trim()).filter(Boolean);
+    this._speaking = true;
+    this._paused = false;
+    this._notify();
+    this._next();
+  },
+
+  _next() {
+    if (!this._speaking || this._paused || this._queue.length === 0) {
+      if (this._queue.length === 0) {
+        this._speaking = false;
+        this._notify();
+      }
+      return;
+    }
+    const lang = getLang(this._langId);
+    const chunk = this._queue.shift();
+    const u = new SpeechSynthesisUtterance(chunk);
+    u.lang = lang.tts;
+    u.rate = this._rate;
+    u.pitch = 1;
+    const voices = window.speechSynthesis.getVoices();
+    const match = voices.find((v) => v.lang.startsWith(lang.tts.split("-")[0]));
+    if (match) u.voice = match;
+    u.onend = () => this._next();
+    u.onerror = () => this._next();
+    window.speechSynthesis.speak(u);
+  },
+
+  pause() {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.pause();
+      this._paused = true;
+      this._notify();
+    }
+  },
+
+  resume() {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.resume();
+      this._paused = false;
+      this._notify();
+      // If the browser cleared the utterance on pause, re-queue
+      if (!window.speechSynthesis.speaking && this._queue.length > 0) this._next();
+    }
+  },
+
+  stop() {
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    this._queue = [];
+    this._speaking = false;
+    this._paused = false;
+    this._notify();
+  },
+
+  get isSpeaking() { return this._speaking; },
+  get isPaused() { return this._paused; },
+
+  _notify() { if (this._onStateChange) this._onStateChange({ speaking: this._speaking, paused: this._paused }); },
+};
 
 function bionicText(text) {
   return text.split(" ").map((word) => {
@@ -515,18 +580,30 @@ function ReaderView({ state, dispatch, theme, t }) {
   const [bionic, setBionic] = useState(state.settings.bionicReading);
   const [chunked, setChunked] = useState(false);
   const [chunkIdx, setChunkIdx] = useState(0);
-  const [speaking, setSpeaking] = useState(false);
+  const [ttsState, setTtsState] = useState({ speaking: false, paused: false });
   const text = state.currentText;
   const chunks = chunked ? chunkText(text) : [text];
   const displayText = chunks[chunkIdx] || "";
 
+  // Wire up TTS state listener
   useEffect(() => {
-    if ("speechSynthesis" in window) {
-      const check = () => setSpeaking(window.speechSynthesis.speaking);
-      const interval = setInterval(check, 200);
-      return () => clearInterval(interval);
-    }
+    ttsEngine._onStateChange = setTtsState;
+    // Ensure voices are loaded (some browsers load them async)
+    if ("speechSynthesis" in window) window.speechSynthesis.getVoices();
+    return () => { ttsEngine._onStateChange = null; };
   }, []);
+
+  // Stop speech when leaving the reader
+  useEffect(() => {
+    return () => ttsEngine.stop();
+  }, []);
+
+  const handlePlay = () => {
+    ttsEngine.speak(displayText, state.lang, state.settings.speechRate);
+  };
+  const handlePause = () => ttsEngine.pause();
+  const handleResume = () => ttsEngine.resume();
+  const handleStop = () => ttsEngine.stop();
 
   if (!text) {
     return (
@@ -552,22 +629,40 @@ function ReaderView({ state, dispatch, theme, t }) {
       {/* Reading language selector */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
         {LANGS.map((l) => (
-          <Chip key={l.id} active={state.lang === l.id} onClick={() => { stopSpeaking(); setSpeaking(false); dispatch({ type: "SET_LANG", payload: l.id }); }} theme={theme}>
+          <Chip key={l.id} active={state.lang === l.id} onClick={() => { ttsEngine.stop(); dispatch({ type: "SET_LANG", payload: l.id }); }} theme={theme}>
             {l.flag} {l.native}
           </Chip>
         ))}
       </div>
 
+      {/* Play / Pause / Stop controls */}
+      <Card theme={theme} glow style={{ display: "flex", justifyContent: "center", gap: "12px", padding: "14px" }}>
+        {!ttsState.speaking ? (
+          <Btn theme={theme} onClick={handlePlay} style={{ minWidth: "140px", fontSize: "1.05em" }}>
+            ▶️ {t.readAloud}
+          </Btn>
+        ) : (
+          <>
+            {ttsState.paused ? (
+              <Btn theme={theme} onClick={handleResume} style={{ minWidth: "110px", fontSize: "1.05em" }}>
+                ▶️ {t.resume}
+              </Btn>
+            ) : (
+              <Btn theme={theme} variant="secondary" onClick={handlePause} style={{ minWidth: "110px", fontSize: "1.05em" }}>
+                ⏸️ {t.pause}
+              </Btn>
+            )}
+            <Btn theme={theme} variant="danger" onClick={handleStop} style={{ fontSize: "1.05em", border: `2px solid ${theme.danger}` }}>
+              ⏹️ {t.stop}
+            </Btn>
+          </>
+        )}
+      </Card>
+
       {/* Reading tools */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
         <Chip active={bionic} onClick={() => setBionic(!bionic)} theme={theme}>𝗔𝗮 {t.bionicMode}</Chip>
-        <Chip active={chunked} onClick={() => { setChunked(!chunked); setChunkIdx(0); }} theme={theme}>📄 {t.chunkMode}</Chip>
-        <Chip active={speaking} onClick={() => {
-          if (speaking) { stopSpeaking(); setSpeaking(false); }
-          else { speak(displayText, state.lang, state.settings.speechRate); setSpeaking(true); }
-        }} theme={theme} color={speaking ? theme.danger : undefined}>
-          {speaking ? `⏹ ${t.stop}` : `🔊 ${t.readAloud}`}
-        </Chip>
+        <Chip active={chunked} onClick={() => { setChunked(!chunked); setChunkIdx(0); ttsEngine.stop(); }} theme={theme}>📄 {t.chunkMode}</Chip>
       </div>
 
       {/* Speech rate */}
@@ -583,10 +678,10 @@ function ReaderView({ state, dispatch, theme, t }) {
       {chunked && chunks.length > 1 && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <Btn theme={theme} variant="outline" style={{ padding: "8px 16px" }} disabled={chunkIdx === 0}
-            onClick={() => setChunkIdx((i) => Math.max(0, i - 1))}>← {t.prev}</Btn>
+            onClick={() => { ttsEngine.stop(); setChunkIdx((i) => Math.max(0, i - 1)); }}>← {t.prev}</Btn>
           <span style={{ color: theme.textMuted, fontSize: "0.9em" }}>{chunkIdx + 1} / {chunks.length}</span>
           <Btn theme={theme} variant="outline" style={{ padding: "8px 16px" }} disabled={chunkIdx >= chunks.length - 1}
-            onClick={() => setChunkIdx((i) => Math.min(chunks.length - 1, i + 1))}>{t.next} →</Btn>
+            onClick={() => { ttsEngine.stop(); setChunkIdx((i) => Math.min(chunks.length - 1, i + 1)); }}>{t.next} →</Btn>
         </div>
       )}
 
@@ -690,7 +785,7 @@ function WriterView({ state, dispatch, theme, t }) {
           style={listening ? { animation: "pulse 1.5s infinite" } : {}}>
           {listening ? "⏹ " + t.stop : "🎤 " + t.voiceInput}
         </Btn>
-        <Btn theme={theme} variant="secondary" onClick={() => speak(text, state.lang, state.settings.speechRate)} disabled={!text.trim()}>
+        <Btn theme={theme} variant="secondary" onClick={() => ttsEngine.speak(text, state.lang, state.settings.speechRate)} disabled={!text.trim()}>
           🔊 {t.readBack}
         </Btn>
         <Btn theme={theme} variant="secondary" onClick={() => {
