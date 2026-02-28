@@ -246,7 +246,7 @@ function reducer(state, action) {
     case "LOAD_STATE": return { ...state, ...action.payload };
     case "SET_VIEW": return { ...state, view: action.payload };
     case "SET_LANG": return { ...state, lang: action.payload };
-    case "SET_OCR_LANG": return { ...state, ocrLang: action.payload };
+    case "SET_OCR_LANG": return { ...state, ocrLang: action.payload, lang: action.payload };
     case "SET_TEXT": return { ...state, currentText: action.payload };
     case "SET_IMAGE": return { ...state, imagePreview: action.payload };
     case "OCR_START": return { ...state, ocrStatus: "loading", ocrProgress: 0 };
@@ -391,6 +391,7 @@ function ScanView({ state, dispatch, theme, t }) {
 
   const handlePasteSubmit = () => {
     if (pasteText.trim()) {
+      dispatch({ type: "SET_LANG", payload: state.ocrLang });
       dispatch({ type: "SET_TEXT", payload: pasteText.trim() });
       dispatch({ type: "SET_VIEW", payload: "read" });
       setPasteText("");
@@ -408,7 +409,7 @@ function ScanView({ state, dispatch, theme, t }) {
           </p>
         </Card>
         <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          <Btn theme={theme} onClick={() => dispatch({ type: "SET_VIEW", payload: "read" })}>
+          <Btn theme={theme} onClick={() => { dispatch({ type: "SET_LANG", payload: state.ocrLang }); dispatch({ type: "SET_VIEW", payload: "read" }); }}>
             📖 {t.openReader}
           </Btn>
           <Btn theme={theme} variant="secondary" onClick={() => {
@@ -542,10 +543,20 @@ function ReaderView({ state, dispatch, theme, t }) {
   }
 
   const wordCount = text.split(/\s+/).filter(Boolean).length;
+  const activeLang = getLang(state.lang);
 
   return (
     <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "14px" }}>
-      <SectionHeader theme={theme} title={t.read} subtitle={`${wordCount} ${t.wordCount}`} icon="📖" />
+      <SectionHeader theme={theme} title={t.read} subtitle={`${activeLang.flag} ${activeLang.native} · ${wordCount} ${t.wordCount}`} icon="📖" />
+
+      {/* Reading language selector */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+        {LANGS.map((l) => (
+          <Chip key={l.id} active={state.lang === l.id} onClick={() => { stopSpeaking(); setSpeaking(false); dispatch({ type: "SET_LANG", payload: l.id }); }} theme={theme}>
+            {l.flag} {l.native}
+          </Chip>
+        ))}
+      </div>
 
       {/* Reading tools */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
