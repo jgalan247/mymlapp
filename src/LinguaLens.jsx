@@ -49,6 +49,9 @@ const LABELS = {
     readingGuide: "Reading Guide", tapToRead: "Tap any saved note to read it",
     or: "or", speechRate: "Speech Rate", slow: "Slow", fast: "Fast",
     pause: "Pause", resume: "Resume",
+    translateTo: "Translate to", translate: "Translate", translating: "Translating…",
+    translation: "Translation", original: "Original", showOriginal: "Show Original",
+    showTranslation: "Show Translation",
   },
   pt: {
     scan: "Digitalizar", read: "Ler", write: "Escrever", notes: "Notas", settings: "Definições",
@@ -67,6 +70,9 @@ const LABELS = {
     readingGuide: "Guia de Leitura", tapToRead: "Toque numa nota para ler",
     or: "ou", speechRate: "Velocidade", slow: "Lento", fast: "Rápido",
     pause: "Pausar", resume: "Continuar",
+    translateTo: "Traduzir para", translate: "Traduzir", translating: "A traduzir…",
+    translation: "Tradução", original: "Original", showOriginal: "Mostrar Original",
+    showTranslation: "Mostrar Tradução",
   },
   es: {
     scan: "Escanear", read: "Leer", write: "Escribir", notes: "Notas", settings: "Ajustes",
@@ -85,6 +91,9 @@ const LABELS = {
     readingGuide: "Guía de Lectura", tapToRead: "Toca una nota para leerla",
     or: "o", speechRate: "Velocidad", slow: "Lento", fast: "Rápido",
     pause: "Pausar", resume: "Reanudar",
+    translateTo: "Traducir a", translate: "Traducir", translating: "Traduciendo…",
+    translation: "Traducción", original: "Original", showOriginal: "Mostrar Original",
+    showTranslation: "Mostrar Traducción",
   },
   pl: {
     scan: "Skanuj", read: "Czytaj", write: "Pisz", notes: "Notatki", settings: "Ustawienia",
@@ -103,6 +112,9 @@ const LABELS = {
     readingGuide: "Linia Czytania", tapToRead: "Dotknij notatkę, aby ją przeczytać",
     or: "lub", speechRate: "Prędkość", slow: "Wolno", fast: "Szybko",
     pause: "Pauza", resume: "Wznów",
+    translateTo: "Przetłumacz na", translate: "Przetłumacz", translating: "Tłumaczenie…",
+    translation: "Tłumaczenie", original: "Oryginał", showOriginal: "Pokaż Oryginał",
+    showTranslation: "Pokaż Tłumaczenie",
   },
   bg: {
     scan: "Сканирай", read: "Четене", write: "Писане", notes: "Бележки", settings: "Настройки",
@@ -121,6 +133,9 @@ const LABELS = {
     readingGuide: "Водач за Четене", tapToRead: "Докоснете бележка, за да я прочетете",
     or: "или", speechRate: "Скорост", slow: "Бавно", fast: "Бързо",
     pause: "Пауза", resume: "Продължи",
+    translateTo: "Преведи на", translate: "Преведи", translating: "Превеждане…",
+    translation: "Превод", original: "Оригинал", showOriginal: "Покажи Оригинала",
+    showTranslation: "Покажи Превода",
   },
   ro: {
     scan: "Scanează", read: "Citește", write: "Scrie", notes: "Note", settings: "Setări",
@@ -139,6 +154,9 @@ const LABELS = {
     readingGuide: "Ghid de Citire", tapToRead: "Atinge o notă pentru a o citi",
     or: "sau", speechRate: "Viteză", slow: "Lent", fast: "Rapid",
     pause: "Pauză", resume: "Continuă",
+    translateTo: "Traduce în", translate: "Traduce", translating: "Se traduce…",
+    translation: "Traducere", original: "Original", showOriginal: "Arată Originalul",
+    showTranslation: "Arată Traducerea",
   },
 };
 
@@ -287,6 +305,34 @@ function chunkText(text, sentencesPerChunk = 3) {
     chunks.push(sentences.slice(i, i + sentencesPerChunk).join(" ").trim());
   }
   return chunks;
+}
+
+// ─── TRANSLATION (MyMemory API — free, no key) ──────────────────
+async function translateText(text, fromLang, toLang, onProgress) {
+  // Split into sentence-sized chunks (MyMemory limit ~500 chars per request)
+  const sentences = text.match(/[^.!?\n]+[.!?\n]+|[^.!?\n]+$/g) || [text];
+  const chunks = [];
+  let current = "";
+  for (const s of sentences) {
+    if ((current + s).length > 450 && current) {
+      chunks.push(current.trim());
+      current = s;
+    } else {
+      current += s;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+
+  const results = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunks[i])}&langpair=${fromLang}|${toLang}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Translation failed");
+    const data = await res.json();
+    results.push(data.responseData.translatedText);
+    if (onProgress) onProgress(Math.round(((i + 1) / chunks.length) * 100));
+  }
+  return results.join(" ");
 }
 
 // ─── STATE ───────────────────────────────────────────────────────
@@ -581,14 +627,26 @@ function ReaderView({ state, dispatch, theme, t }) {
   const [chunked, setChunked] = useState(false);
   const [chunkIdx, setChunkIdx] = useState(0);
   const [ttsState, setTtsState] = useState({ speaking: false, paused: false });
+  // Translation state
+  const [targetLang, setTargetLang] = useState(() => state.lang === "en" ? "es" : "en");
+  const [translated, setTranslated] = useState("");
+  const [translating, setTranslating] = useState(false);
+  const [transProgress, setTransProgress] = useState(0);
+  const [showTranslation, setShowTranslation] = useState(false);
+  const sourceLangRef = useRef(state.lang);
+
   const text = state.currentText;
   const chunks = chunked ? chunkText(text) : [text];
   const displayText = chunks[chunkIdx] || "";
 
+  // The text we actually show — original or translated
+  const visibleText = showTranslation && translated ? translated : displayText;
+  // The language TTS should use — target if showing translation, source otherwise
+  const ttsLangId = showTranslation && translated ? targetLang : state.lang;
+
   // Wire up TTS state listener
   useEffect(() => {
     ttsEngine._onStateChange = setTtsState;
-    // Ensure voices are loaded (some browsers load them async)
     if ("speechSynthesis" in window) window.speechSynthesis.getVoices();
     return () => { ttsEngine._onStateChange = null; };
   }, []);
@@ -598,21 +656,42 @@ function ReaderView({ state, dispatch, theme, t }) {
     return () => ttsEngine.stop();
   }, []);
 
+  // Clear translation when source text or source language changes
+  useEffect(() => {
+    if (sourceLangRef.current !== state.lang) {
+      setTranslated("");
+      setShowTranslation(false);
+      sourceLangRef.current = state.lang;
+    }
+  }, [state.lang]);
+
   const handlePlay = () => {
-    ttsEngine.speak(displayText, state.lang, state.settings.speechRate);
+    ttsEngine.speak(visibleText, ttsLangId, state.settings.speechRate);
   };
   const handlePause = () => ttsEngine.pause();
   const handleResume = () => ttsEngine.resume();
   const handleStop = () => ttsEngine.stop();
+
+  const handleTranslate = async () => {
+    ttsEngine.stop();
+    setTranslating(true);
+    setTransProgress(0);
+    try {
+      const result = await translateText(displayText, state.lang, targetLang, setTransProgress);
+      setTranslated(result);
+      setShowTranslation(true);
+    } catch {
+      setTranslated("");
+    }
+    setTranslating(false);
+  };
 
   if (!text) {
     return (
       <div style={{ padding: "20px", textAlign: "center" }}>
         <SectionHeader theme={theme} title={t.read} icon="📖" />
         <Card theme={theme}>
-          <p style={{ color: theme.textMuted, margin: "30px 0" }}>
-            {t.welcomeSub}
-          </p>
+          <p style={{ color: theme.textMuted, margin: "30px 0" }}>{t.welcomeSub}</p>
           <Btn theme={theme} onClick={() => dispatch({ type: "SET_VIEW", payload: "scan" })}>📷 {t.scan}</Btn>
         </Card>
       </div>
@@ -621,48 +700,85 @@ function ReaderView({ state, dispatch, theme, t }) {
 
   const wordCount = text.split(/\s+/).filter(Boolean).length;
   const activeLang = getLang(state.lang);
+  const targetLangObj = getLang(targetLang);
 
   return (
     <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "14px" }}>
       <SectionHeader theme={theme} title={t.read} subtitle={`${activeLang.flag} ${activeLang.native} · ${wordCount} ${t.wordCount}`} icon="📖" />
 
-      {/* Reading language selector */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-        {LANGS.map((l) => (
-          <Chip key={l.id} active={state.lang === l.id} onClick={() => { ttsEngine.stop(); dispatch({ type: "SET_LANG", payload: l.id }); }} theme={theme}>
-            {l.flag} {l.native}
-          </Chip>
-        ))}
-      </div>
+      {/* Source language selector */}
+      <Card theme={theme}>
+        <p style={{ color: theme.textMuted, fontSize: "0.85em", margin: "0 0 8px", fontWeight: 600 }}>{t.language}</p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+          {LANGS.map((l) => (
+            <Chip key={l.id} active={state.lang === l.id} onClick={() => { ttsEngine.stop(); dispatch({ type: "SET_LANG", payload: l.id }); }} theme={theme}>
+              {l.flag} {l.native}
+            </Chip>
+          ))}
+        </div>
+      </Card>
 
-      {/* Play / Pause / Stop controls */}
-      <Card theme={theme} glow style={{ display: "flex", justifyContent: "center", gap: "12px", padding: "14px" }}>
-        {!ttsState.speaking ? (
-          <Btn theme={theme} onClick={handlePlay} style={{ minWidth: "140px", fontSize: "1.05em" }}>
-            ▶️ {t.readAloud}
-          </Btn>
+      {/* Translate to */}
+      <Card theme={theme} glow>
+        <p style={{ color: theme.textMuted, fontSize: "0.85em", margin: "0 0 8px", fontWeight: 600 }}>{t.translateTo}</p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" }}>
+          {LANGS.filter((l) => l.id !== state.lang).map((l) => (
+            <Chip key={l.id} active={targetLang === l.id} onClick={() => { setTargetLang(l.id); setTranslated(""); setShowTranslation(false); }} theme={theme}>
+              {l.flag} {l.native}
+            </Chip>
+          ))}
+        </div>
+        {translating ? (
+          <ProgressBar progress={transProgress} theme={theme} label={t.translating} />
         ) : (
-          <>
-            {ttsState.paused ? (
-              <Btn theme={theme} onClick={handleResume} style={{ minWidth: "110px", fontSize: "1.05em" }}>
-                ▶️ {t.resume}
-              </Btn>
-            ) : (
-              <Btn theme={theme} variant="secondary" onClick={handlePause} style={{ minWidth: "110px", fontSize: "1.05em" }}>
-                ⏸️ {t.pause}
+          <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+            <Btn theme={theme} onClick={handleTranslate} style={{ flex: 1 }}>
+              🌐 {t.translate} → {targetLangObj.flag} {targetLangObj.native}
+            </Btn>
+            {translated && (
+              <Btn theme={theme} variant={showTranslation ? "outline" : "secondary"} onClick={() => setShowTranslation(!showTranslation)} style={{ whiteSpace: "nowrap" }}>
+                {showTranslation ? `📄 ${t.showOriginal}` : `🌐 ${t.showTranslation}`}
               </Btn>
             )}
-            <Btn theme={theme} variant="danger" onClick={handleStop} style={{ fontSize: "1.05em", border: `2px solid ${theme.danger}` }}>
-              ⏹️ {t.stop}
-            </Btn>
-          </>
+          </div>
         )}
+      </Card>
+
+      {/* Play / Pause / Stop controls */}
+      <Card theme={theme} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", padding: "14px" }}>
+        {showTranslation && translated && (
+          <p style={{ color: theme.accent, fontSize: "0.85em", margin: 0, fontWeight: 600 }}>
+            🔊 {targetLangObj.flag} {targetLangObj.native}
+          </p>
+        )}
+        <div style={{ display: "flex", justifyContent: "center", gap: "12px" }}>
+          {!ttsState.speaking ? (
+            <Btn theme={theme} onClick={handlePlay} style={{ minWidth: "140px", fontSize: "1.05em" }}>
+              ▶️ {t.readAloud}
+            </Btn>
+          ) : (
+            <>
+              {ttsState.paused ? (
+                <Btn theme={theme} onClick={handleResume} style={{ minWidth: "110px", fontSize: "1.05em" }}>
+                  ▶️ {t.resume}
+                </Btn>
+              ) : (
+                <Btn theme={theme} variant="secondary" onClick={handlePause} style={{ minWidth: "110px", fontSize: "1.05em" }}>
+                  ⏸️ {t.pause}
+                </Btn>
+              )}
+              <Btn theme={theme} variant="danger" onClick={handleStop} style={{ fontSize: "1.05em", border: `2px solid ${theme.danger}` }}>
+                ⏹️ {t.stop}
+              </Btn>
+            </>
+          )}
+        </div>
       </Card>
 
       {/* Reading tools */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
         <Chip active={bionic} onClick={() => setBionic(!bionic)} theme={theme}>𝗔𝗮 {t.bionicMode}</Chip>
-        <Chip active={chunked} onClick={() => { setChunked(!chunked); setChunkIdx(0); ttsEngine.stop(); }} theme={theme}>📄 {t.chunkMode}</Chip>
+        <Chip active={chunked} onClick={() => { setChunked(!chunked); setChunkIdx(0); ttsEngine.stop(); setTranslated(""); setShowTranslation(false); }} theme={theme}>📄 {t.chunkMode}</Chip>
       </div>
 
       {/* Speech rate */}
@@ -678,21 +794,26 @@ function ReaderView({ state, dispatch, theme, t }) {
       {chunked && chunks.length > 1 && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <Btn theme={theme} variant="outline" style={{ padding: "8px 16px" }} disabled={chunkIdx === 0}
-            onClick={() => { ttsEngine.stop(); setChunkIdx((i) => Math.max(0, i - 1)); }}>← {t.prev}</Btn>
+            onClick={() => { ttsEngine.stop(); setChunkIdx((i) => Math.max(0, i - 1)); setTranslated(""); setShowTranslation(false); }}>← {t.prev}</Btn>
           <span style={{ color: theme.textMuted, fontSize: "0.9em" }}>{chunkIdx + 1} / {chunks.length}</span>
           <Btn theme={theme} variant="outline" style={{ padding: "8px 16px" }} disabled={chunkIdx >= chunks.length - 1}
-            onClick={() => { ttsEngine.stop(); setChunkIdx((i) => Math.min(chunks.length - 1, i + 1)); }}>{t.next} →</Btn>
+            onClick={() => { ttsEngine.stop(); setChunkIdx((i) => Math.min(chunks.length - 1, i + 1)); setTranslated(""); setShowTranslation(false); }}>{t.next} →</Btn>
         </div>
       )}
 
       {/* Text display */}
       <Card theme={theme} glow style={{ minHeight: "200px" }}>
+        {showTranslation && translated && (
+          <p style={{ color: theme.accent, fontSize: "0.8em", fontWeight: 700, margin: "0 0 8px" }}>
+            {targetLangObj.flag} {t.translation}
+          </p>
+        )}
         {bionic ? (
           <div style={{ color: theme.text, lineHeight: 2, fontSize: "1.05em" }}
-            dangerouslySetInnerHTML={{ __html: bionicText(displayText) }} />
+            dangerouslySetInnerHTML={{ __html: bionicText(visibleText) }} />
         ) : (
           <p style={{ color: theme.text, lineHeight: 2, fontSize: "1.05em", margin: 0, whiteSpace: "pre-wrap" }}>
-            {displayText}
+            {visibleText}
           </p>
         )}
       </Card>
@@ -700,7 +821,7 @@ function ReaderView({ state, dispatch, theme, t }) {
       {/* Actions */}
       <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
         <Btn theme={theme} variant="secondary" onClick={() => {
-          dispatch({ type: "ADD_NOTE", payload: { id: genId(), text, lang: state.lang, createdAt: Date.now(), source: "reader" } });
+          dispatch({ type: "ADD_NOTE", payload: { id: genId(), text: showTranslation && translated ? translated : text, lang: showTranslation ? targetLang : state.lang, createdAt: Date.now(), source: "reader" } });
         }}>
           💾 {t.saveNote}
         </Btn>
@@ -719,6 +840,11 @@ function WriterView({ state, dispatch, theme, t }) {
   const [listening, setListening] = useState(false);
   const [saved, setSaved] = useState(false);
   const recognitionRef = useRef(null);
+  // Translation state
+  const [targetLang, setTargetLang] = useState(() => state.lang === "en" ? "es" : "en");
+  const [translated, setTranslated] = useState("");
+  const [translating, setTranslating] = useState(false);
+  const [transProgress, setTransProgress] = useState(0);
 
   const startVoice = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -754,18 +880,44 @@ function WriterView({ state, dispatch, theme, t }) {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  const handleTranslate = async () => {
+    if (!text.trim()) return;
+    setTranslating(true);
+    setTransProgress(0);
+    try {
+      const result = await translateText(text.trim(), state.lang, targetLang, setTransProgress);
+      setTranslated(result);
+    } catch {
+      setTranslated("");
+    }
+    setTranslating(false);
+  };
+
+  // Clear translation when source text changes
+  useEffect(() => { setTranslated(""); }, [text]);
+
   const wordCount = text.split(/\s+/).filter(Boolean).length;
+  const targetLangObj = getLang(targetLang);
 
   return (
     <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "16px" }}>
       <SectionHeader theme={theme} title={t.write} subtitle={`${getLang(state.lang).flag} ${getLang(state.lang).native}`} icon="✍️" />
+
+      {/* Writing language selector */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+        {LANGS.map((l) => (
+          <Chip key={l.id} active={state.lang === l.id} onClick={() => dispatch({ type: "SET_LANG", payload: l.id })} theme={theme}>
+            {l.flag} {l.native}
+          </Chip>
+        ))}
+      </div>
 
       <Card theme={theme} glow>
         <textarea
           value={text} onChange={(e) => setText(e.target.value)}
           placeholder={t.startWriting}
           style={{
-            width: "100%", minHeight: "250px", padding: "14px", borderRadius: "12px",
+            width: "100%", minHeight: "200px", padding: "14px", borderRadius: "12px",
             border: `2px solid ${theme.border}`, background: theme.bg, color: theme.text,
             fontSize: "1.05em", fontFamily: "inherit", outline: "none", resize: "vertical",
             boxSizing: "border-box", lineHeight: 1.8,
@@ -798,11 +950,53 @@ function WriterView({ state, dispatch, theme, t }) {
         </Btn>
       </div>
 
+      {/* Translate to */}
+      <Card theme={theme}>
+        <p style={{ color: theme.textMuted, fontSize: "0.85em", margin: "0 0 8px", fontWeight: 600 }}>{t.translateTo}</p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" }}>
+          {LANGS.filter((l) => l.id !== state.lang).map((l) => (
+            <Chip key={l.id} active={targetLang === l.id} onClick={() => { setTargetLang(l.id); setTranslated(""); }} theme={theme}>
+              {l.flag} {l.native}
+            </Chip>
+          ))}
+        </div>
+        {translating ? (
+          <ProgressBar progress={transProgress} theme={theme} label={t.translating} />
+        ) : (
+          <Btn theme={theme} onClick={handleTranslate} disabled={!text.trim()} style={{ width: "100%" }}>
+            🌐 {t.translate} → {targetLangObj.flag} {targetLangObj.native}
+          </Btn>
+        )}
+      </Card>
+
+      {/* Translation result */}
+      {translated && (
+        <Card theme={theme} glow>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+            <p style={{ color: theme.accent, fontSize: "0.85em", fontWeight: 700, margin: 0 }}>
+              {targetLangObj.flag} {t.translation}
+            </p>
+            <Btn theme={theme} variant="outline" style={{ padding: "6px 14px", fontSize: "0.8em" }}
+              onClick={() => ttsEngine.speak(translated, targetLang, state.settings.speechRate)}>
+              🔊 {t.readAloud}
+            </Btn>
+          </div>
+          <p style={{ color: theme.text, lineHeight: 1.8, margin: 0, whiteSpace: "pre-wrap" }}>{translated}</p>
+          <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
+            <Btn theme={theme} variant="secondary" style={{ fontSize: "0.85em", padding: "8px 16px" }} onClick={() => {
+              dispatch({ type: "ADD_NOTE", payload: { id: genId(), text: translated, lang: targetLang, createdAt: Date.now(), source: "writer" } });
+            }}>
+              💾 {t.saveNote}
+            </Btn>
+          </div>
+        </Card>
+      )}
+
       <div style={{ display: "flex", gap: "10px" }}>
         <Btn theme={theme} variant="success" onClick={saveNote} disabled={!text.trim()}>
           {saved ? `✅ ${t.saved}` : `💾 ${t.saveNote}`}
         </Btn>
-        <Btn theme={theme} variant="outline" onClick={() => setText("")} disabled={!text}>
+        <Btn theme={theme} variant="outline" onClick={() => { setText(""); setTranslated(""); }} disabled={!text}>
           🗑 {t.clear}
         </Btn>
       </div>
