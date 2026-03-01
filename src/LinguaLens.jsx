@@ -213,12 +213,15 @@ const LETTER_SPACINGS = { normal: "0em", wide: "0.04em", wider: "0.07em" };
 const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 // TTS engine — handles Chrome's bug where long utterances silently die.
-// We split text into short sentences and queue them one at a time.
+// Splits text into sentences, tracks character offsets for word highlighting.
 const ttsEngine = {
   _queue: [],
+  _offsets: [],
+  _idx: 0,
   _speaking: false,
   _paused: false,
   _onStateChange: null,
+  _onHighlight: null,
   _langId: "en",
   _rate: 0.9,
 
@@ -227,9 +230,27 @@ const ttsEngine = {
     this.stop();
     this._langId = langId;
     this._rate = rate;
-    // Split into sentences (max ~200 chars each) to avoid Chrome timeout
-    const sentences = text.match(/[^.!?\n]+[.!?\n]+|[^.!?\n]+$/g) || [text];
-    this._queue = sentences.map((s) => s.trim()).filter(Boolean);
+
+    // Split into sentences, tracking their start positions in the original text
+    const regex = /[^.!?\n]+[.!?\n]+|[^.!?\n]+$/g;
+    let m;
+    this._queue = [];
+    this._offsets = [];
+    while ((m = regex.exec(text)) !== null) {
+      const raw = m[0];
+      const trimmed = raw.trim();
+      if (trimmed) {
+        const leading = raw.length - raw.trimStart().length;
+        this._queue.push(trimmed);
+        this._offsets.push(m.index + leading);
+      }
+    }
+    if (this._queue.length === 0 && text.trim()) {
+      this._queue = [text.trim()];
+      this._offsets = [Math.max(0, text.indexOf(text.trim()))];
+    }
+
+    this._idx = 0;
     this._speaking = true;
     this._paused = false;
     this._notify();
@@ -237,24 +258,35 @@ const ttsEngine = {
   },
 
   _next() {
-    if (!this._speaking || this._paused || this._queue.length === 0) {
-      if (this._queue.length === 0) {
+    if (!this._speaking || this._paused || this._idx >= this._queue.length) {
+      if (this._idx >= this._queue.length) {
         this._speaking = false;
+        this._highlight(-1);
         this._notify();
       }
       return;
     }
+    const i = this._idx;
+    const chunk = this._queue[i];
+    const offset = this._offsets[i];
     const lang = getLang(this._langId);
-    const chunk = this._queue.shift();
     const u = new SpeechSynthesisUtterance(chunk);
     u.lang = lang.tts;
     u.rate = this._rate;
     u.pitch = 1;
     const voices = window.speechSynthesis.getVoices();
-    const match = voices.find((v) => v.lang.startsWith(lang.tts.split("-")[0]));
-    if (match) u.voice = match;
-    u.onend = () => this._next();
-    u.onerror = () => this._next();
+    const voiceMatch = voices.find((v) => v.lang.startsWith(lang.tts.split("-")[0]));
+    if (voiceMatch) u.voice = voiceMatch;
+
+    // Word-level highlighting via boundary events
+    u.onboundary = (e) => {
+      if (e.name === "word") this._highlight(offset + e.charIndex);
+    };
+    // Highlight first word immediately (fallback if onboundary never fires)
+    this._highlight(offset);
+
+    u.onend = () => { this._idx++; this._next(); };
+    u.onerror = () => { this._idx++; this._next(); };
     window.speechSynthesis.speak(u);
   },
 
@@ -271,16 +303,18 @@ const ttsEngine = {
       window.speechSynthesis.resume();
       this._paused = false;
       this._notify();
-      // If the browser cleared the utterance on pause, re-queue
-      if (!window.speechSynthesis.speaking && this._queue.length > 0) this._next();
+      if (!window.speechSynthesis.speaking && this._idx < this._queue.length) this._next();
     }
   },
 
   stop() {
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     this._queue = [];
+    this._offsets = [];
+    this._idx = 0;
     this._speaking = false;
     this._paused = false;
+    this._highlight(-1);
     this._notify();
   },
 
@@ -288,14 +322,13 @@ const ttsEngine = {
   get isPaused() { return this._paused; },
 
   _notify() { if (this._onStateChange) this._onStateChange({ speaking: this._speaking, paused: this._paused }); },
+  _highlight(charIdx) { if (this._onHighlight) this._onHighlight(charIdx); },
 };
 
-function bionicText(text) {
-  return text.split(" ").map((word) => {
-    if (word.length <= 1) return word;
-    const boldLen = Math.ceil(word.length * 0.45);
-    return `<b>${word.slice(0, boldLen)}</b>${word.slice(boldLen)}`;
-  }).join(" ");
+function bionicWord(word) {
+  if (word.length <= 1) return word;
+  const boldLen = Math.ceil(word.length * 0.45);
+  return { bold: word.slice(0, boldLen), rest: word.slice(boldLen) };
 }
 
 function chunkText(text, sentencesPerChunk = 3) {
@@ -459,6 +492,44 @@ function ProgressBar({ progress, theme, label }) {
         }} />
       </div>
       <p style={{ color: theme.textMuted, fontSize: "0.85em", margin: "6px 0 0", textAlign: "center" }}>{Math.round(progress)}%</p>
+    </div>
+  );
+}
+
+// ─── HIGHLIGHTED TEXT (word tracking during TTS) ─────────────────
+
+function HighlightedText({ text, highlightCharIdx, bionic, theme }) {
+  // Split into tokens preserving whitespace
+  const parts = text.split(/(\s+)/);
+  let charPos = 0;
+
+  return (
+    <div style={{ color: theme.text, lineHeight: 2, fontSize: "1.05em" }}>
+      {parts.map((part, i) => {
+        const start = charPos;
+        charPos += part.length;
+
+        if (/^\s+$/.test(part)) {
+          return part.includes("\n") ? <br key={i} /> : <span key={i}>{part}</span>;
+        }
+
+        const isActive = highlightCharIdx >= 0 && highlightCharIdx >= start && highlightCharIdx < charPos;
+
+        const highlightStyle = isActive
+          ? { background: theme.accentSoft, borderRadius: "4px", padding: "2px 2px", boxShadow: `0 0 0 2px ${theme.accentSoft}`, transition: "background 0.12s" }
+          : { transition: "background 0.12s" };
+
+        if (bionic && part.length > 1) {
+          const bw = bionicWord(part);
+          return (
+            <span key={i} style={highlightStyle}>
+              <b>{bw.bold}</b>{bw.rest}
+            </span>
+          );
+        }
+
+        return <span key={i} style={highlightStyle}>{part}</span>;
+      })}
     </div>
   );
 }
@@ -644,17 +715,26 @@ function ReaderView({ state, dispatch, theme, t }) {
   // The language TTS should use — target if showing translation, source otherwise
   const ttsLangId = showTranslation && translated ? targetLang : state.lang;
 
-  // Wire up TTS state listener
+  // Word highlight tracking
+  const [highlightIdx, setHighlightIdx] = useState(-1);
+
+  // Wire up TTS state + highlight listeners
   useEffect(() => {
     ttsEngine._onStateChange = setTtsState;
+    ttsEngine._onHighlight = setHighlightIdx;
     if ("speechSynthesis" in window) window.speechSynthesis.getVoices();
-    return () => { ttsEngine._onStateChange = null; };
+    return () => { ttsEngine._onStateChange = null; ttsEngine._onHighlight = null; };
   }, []);
 
   // Stop speech when leaving the reader
   useEffect(() => {
     return () => ttsEngine.stop();
   }, []);
+
+  // Clear highlight when not speaking
+  useEffect(() => {
+    if (!ttsState.speaking) setHighlightIdx(-1);
+  }, [ttsState.speaking]);
 
   // Clear translation when source text or source language changes
   useEffect(() => {
@@ -801,21 +881,14 @@ function ReaderView({ state, dispatch, theme, t }) {
         </div>
       )}
 
-      {/* Text display */}
+      {/* Text display with word highlighting */}
       <Card theme={theme} glow style={{ minHeight: "200px" }}>
         {showTranslation && translated && (
           <p style={{ color: theme.accent, fontSize: "0.8em", fontWeight: 700, margin: "0 0 8px" }}>
             {targetLangObj.flag} {t.translation}
           </p>
         )}
-        {bionic ? (
-          <div style={{ color: theme.text, lineHeight: 2, fontSize: "1.05em" }}
-            dangerouslySetInnerHTML={{ __html: bionicText(visibleText) }} />
-        ) : (
-          <p style={{ color: theme.text, lineHeight: 2, fontSize: "1.05em", margin: 0, whiteSpace: "pre-wrap" }}>
-            {visibleText}
-          </p>
-        )}
+        <HighlightedText text={visibleText} highlightCharIdx={highlightIdx} bionic={bionic} theme={theme} />
       </Card>
 
       {/* Actions */}
